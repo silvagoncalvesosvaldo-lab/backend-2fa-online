@@ -8,10 +8,7 @@ const app = express();
 app.use(express.json());
 
 const DEV_MODE = process.env.DEV_MODE === 'true';
-app.use(cors({
-  origin: DEV_MODE ? '*' : (origin, cb)=> cb(null, origin),
-  credentials: true
-}));
+app.use(cors({ origin: '*', credentials: true }));
 
 const {
   PORT = 3000,
@@ -25,16 +22,6 @@ const {
 
 let databases;
 (function initAppwrite(){
-  const missing = [];
-  if (!APPWRITE_ENDPOINT) missing.push('APPWRITE_ENDPOINT');
-  if (!APPWRITE_PROJECT_ID) missing.push('APPWRITE_PROJECT_ID');
-  if (!APPWRITE_API_KEY) missing.push('APPWRITE_API_KEY');
-  if (!APPWRITE_DB_ID) missing.push('APPWRITE_DB_ID');
-  if (!APPWRITE_ADMINS_COLLECTION_ID) missing.push('APPWRITE_ADMINS_COLLECTION_ID');
-  if (!APPWRITE_2FA_COLLECTION_ID) missing.push('APPWRITE_2FA_COLLECTION_ID');
-  if (missing.length) {
-    console.warn('Appwrite envs missing:', missing.join(', '));
-  }
   try {
     const client = new Client()
       .setEndpoint(APPWRITE_ENDPOINT)
@@ -66,24 +53,22 @@ if (DEV_MODE) {
 
   app.get('/debug/form', (_req, res)=> {
     res.set('Content-Type', 'text/html; charset=utf-8').send(`
-<!doctype html>
-<html>
-<head><meta charset="utf-8"><title>Admin Test</title></head>
+<!doctype html><html><head><meta charset="utf-8"><title>Admin Test</title></head>
 <body style="font-family:sans-serif;max-width:720px;margin:40px auto;">
-  <h1>Teste de Login Admin</h1>
-  <label>Email: <input id="email" value=""></label><br><br>
-  <label>Senha: <input id="senha" type="password" value=""></label><br><br>
-  <button onclick="login()">Login /admin/login</button>
-  <pre id="loginOut"></pre>
-  <hr>
-  <h2>Verificar 2FA</h2>
-  <label>code_id: <input id="code_id" value=""></label><br><br>
-  <label>code: <input id="code" value=""></label><br><br>
-  <button onclick="verify()">Verify /admin/verify-2fa</button>
-  <pre id="verifyOut"></pre>
+<h1>Teste de Login Admin</h1>
+<label>Email: <input id="email" value=""></label><br><br>
+<label>Senha: <input id="senha" type="password" value=""></label><br><br>
+<button onclick="login()">Login /admin/login</button>
+<pre id="loginOut"></pre>
+<hr>
+<h2>Verificar 2FA</h2>
+<label>code_id: <input id="code_id" value=""></label><br><br>
+<label>code: <input id="code" value=""></label><br><br>
+<button onclick="verify()">Verify /admin/verify-2fa</button>
+<pre id="verifyOut"></pre>
 <script>
 async function login(){
-  const email = document.getElementById('email').value;
+  const email = document.getElementById('email').value.trim();
   const senha = document.getElementById('senha').value;
   const out = document.getElementById('loginOut');
   out.textContent = '...';
@@ -99,8 +84,8 @@ async function login(){
   }
 }
 async function verify(){
-  const code_id = document.getElementById('code_id').value;
-  const code = document.getElementById('code').value;
+  const code_id = document.getElementById('code_id').value.trim();
+  const code = document.getElementById('code').value.trim();
   const out = document.getElementById('verifyOut');
   out.textContent = '...';
   const r = await fetch('/admin/verify-2fa', {
@@ -114,33 +99,31 @@ async function verify(){
   });
 }
 
-function sixDigits(){
-  return ('' + Math.floor(100000 + Math.random()*900000));
-}
+function sixDigits(){ return String(Math.floor(100000 + Math.random()*900000)); }
 
 app.post('/admin/login', async (req, res)=> {
   try {
     const { email, senha } = req.body || {};
     if (!email || !senha) return res.status(400).json({ success:false, message:'Email e senha são obrigatórios' });
 
-    // Buscar admin por email
     const docs = await databases.listDocuments(APPWRITE_DB_ID, APPWRITE_ADMINS_COLLECTION_ID, [
       Query.equal('email', email)
     ]);
     if (!docs.total) return res.status(401).json({ success:false, message:'Admin não encontrado' });
     const admin = docs.documents[0];
 
-    const ok = admin.senha_hash && require('bcryptjs').compareSync(senha, admin.senha_hash);
+    const ok = admin.senha_hash && bcrypt.compareSync(senha, admin.senha_hash);
     if (!ok) return res.status(401).json({ success:false, message:'Senha incorreta' });
 
-    // Criar código 2FA
     const code = sixDigits();
-    const code_hash = require('bcryptjs').hashSync(code, 10);
+    const code_hash = bcrypt.hashSync(code, 10);
     const expiresAt = new Date(Date.now() + 5*60*1000).toISOString();
 
+    // 🔴 Ajuste: incluir também o campo "code" porque a collection exige esse atributo
     const created = await databases.createDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, ID.unique(), {
       admin_id: admin.$id,
       email,
+      code,        // <— campo exigido pela collection
       code_hash,
       expires_at: expiresAt,
       used: false
@@ -171,12 +154,11 @@ app.post('/admin/verify-2fa', async (req, res)=> {
     if (new Date(doc.expires_at).getTime() < Date.now())
       return res.status(400).json({ success:false, message:'Código expirado' });
 
-    const ok = require('bcryptjs').compareSync(code, doc.code_hash);
+    const ok = bcrypt.compareSync(code, doc.code_hash);
     if (!ok) return res.status(401).json({ success:false, message:'Código inválido' });
 
     await databases.updateDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, code_id, { used: true });
 
-    // Aqui você criaria a sessão/JWT; por ora, só confirma
     return res.json({ success:true, message:'2FA verificada' });
   } catch (err) {
     console.error('Verify error:', err);
@@ -184,6 +166,4 @@ app.post('/admin/verify-2fa', async (req, res)=> {
   }
 });
 
-app.listen(PORT, ()=> {
-  console.log(`Server listening on :${PORT}`);
-});
+app.listen(PORT, ()=> console.log(`Server listening on :${PORT}`));
