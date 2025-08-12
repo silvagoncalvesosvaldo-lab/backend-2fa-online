@@ -1,19 +1,19 @@
 {
-  "name": "backend-2fa-admin",
+  "name": "backend-2fa-online",
   "version": "1.0.0",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
-    "express": "4.19.2",
-    "cors": "2.8.5",
-    "bcryptjs": "2.4.3",
-    "node-appwrite": "^13.0.0",
-    "dotenv": "^16.4.5"
-  },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.1",
+    "express": "^4.19.2",
+    "node-appwrite": "^13.0.0"
   }
 }
