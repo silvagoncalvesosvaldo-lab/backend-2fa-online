@@ -1,181 +1,125 @@
-// server.js — Backend 2FA (Appwrite + Z-API) — CommonJS
-
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const bcrypt = require('bcryptjs');
-const { Client, Databases, ID, Query } = require('node-appwrite');
+const { Client, Databases, ID } = require('node-appwrite');
 
-// =========================
-//  App
-// =========================
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// =========================
-//  ENV (Render -> Environment)
-// =========================
-const {
-  PORT = 3000,
+const PORT = process.env.PORT || 3000;
 
-  // Appwrite
+// Variáveis de ambiente
+const {
+  DEV_MODE,
   APPWRITE_ENDPOINT,
   APPWRITE_PROJECT_ID,
   APPWRITE_API_KEY,
   APPWRITE_DB_ID,
-  APPWRITE_ADMINS_COLLECTION_ID,   // collection: admins
-  APPWRITE_2FA_COLLECTION_ID,      // collection: admin_2fa_codes
-
-  // Z-API (WhatsApp)
-  ZAPI_INSTANCE_ID,
-  ZAPI_TOKEN,
-  ADMIN_WHATSAPP,                  // ex: 5543999533321
+  APPWRITE_2FA_COLLECTION_ID
 } = process.env;
 
-// =========================
-//  Appwrite Client
-// =========================
-const client = new Client()
-  .setEndpoint(APPWRITE_ENDPOINT)
-  .setProject(APPWRITE_PROJECT_ID)
-  .setKey(APPWRITE_API_KEY);
+// Inicialização do Appwrite
+let appwriteClient = null;
+let appwriteDB = null;
 
-const db = new Databases(client);
+if (APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID && APPWRITE_API_KEY && APPWRITE_DB_ID && APPWRITE_2FA_COLLECTION_ID) {
+  try {
+    appwriteClient = new Client()
+      .setEndpoint(APPWRITE_ENDPOINT)
+      .setProject(APPWRITE_PROJECT_ID)
+      .setKey(APPWRITE_API_KEY);
 
-// =========================
-function gerarCodigo() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-async function enviarWhatsAppZAPI(phone, message) {
-  // Node 20 tem fetch global
-  const url = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}/send-text`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ phone, message }),
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Falha ao enviar WhatsApp: ${res.status} ${txt}`);
+    appwriteDB = new Databases(appwriteClient);
+    console.log('Appwrite inicializado com sucesso.');
+  } catch (err) {
+    console.warn('Falha ao inicializar Appwrite:', err.message);
   }
-  return await res.json();
+} else {
+  console.warn('Variáveis de ambiente do Appwrite incompletas. Appwrite não será inicializado.');
 }
 
-async function salvarCodigo2FA(email, code, minutos = 10) {
-  const expiresAt = new Date(Date.now() + minutos * 60 * 1000).toISOString();
-  const payload = {
-    email,
-    code,
-    used: false,
-    expiresAt,
-    createdAt: new Date().toISOString(),
+// Rota de saúde
+app.get('/health', (req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
+
+// Rota de depuração (ANTES do listen)
+app.get('/debug/env', (req, res) => {
+  if (DEV_MODE !== 'true') return res.status(404).end();
+
+  const maskValue = (val) => {
+    if (!val) return null;
+    if (val.length <= 3) return '***';
+    return '***' + val.slice(-3);
   };
-  await db.createDocument(
-    APPWRITE_DB_ID,
-    APPWRITE_2FA_COLLECTION_ID,
-    ID.unique(),
-    payload
-  );
-  return { code, expiresAt };
-}
 
-async function buscarUltimoCodigo(email) {
-  const result = await db.listDocuments(
-    APPWRITE_DB_ID,
-    APPWRITE_2FA_COLLECTION_ID,
-    [Query.equal('email', email), Query.orderDesc('$createdAt'), Query.limit(1)]
-  );
-  return result.documents?.[0] || null;
-}
-
-async function marcarCodigoComoUsado(documentId) {
-  await db.updateDocument(
-    APPWRITE_DB_ID,
-    APPWRITE_2FA_COLLECTION_ID,
-    documentId,
-    { used: true }
-  );
-}
-
-async function buscarAdminPorEmail(email) {
-  const result = await db.listDocuments(
-    APPWRITE_DB_ID,
-    APPWRITE_ADMINS_COLLECTION_ID,
-    [Query.equal('email', email), Query.limit(1)]
-  );
-  return result.documents?.[0] || null;
-}
-
-// =========================
-//  Rotas
-// =========================
-app.get('/', (_req, res) => {
-  res.send('OK - login-admin-2fa (Appwrite only)');
+  res.json({
+    DEV_MODE,
+    APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT,
+    APPWRITE_PROJECT_ID: maskValue(APPWRITE_PROJECT_ID),
+    APPWRITE_API_KEY: maskValue(APPWRITE_API_KEY),
+    APPWRITE_DB_ID: maskValue(APPWRITE_DB_ID),
+    APPWRITE_2FA_COLLECTION_ID: maskValue(APPWRITE_2FA_COLLECTION_ID)
+  });
 });
 
-// Login: confere admin e envia código por WhatsApp
+// Login admin (DEV)
 app.post('/admin/login', async (req, res) => {
-  try {
-    const { email, senha } = req.body;
-    if (!email || !senha) {
-      return res.status(400).json({ success: false, message: 'E-mail e senha são obrigatórios.' });
+  const { email, senha } = req.body || {};
+  if (typeof email !== 'string' || typeof senha !== 'string') {
+    return res.status(400).json({ success: false, message: 'Parâmetros inválidos' });
+  }
+
+  if (DEV_MODE === 'true') {
+    const code = '123456';
+    const expiresInSec = 300;
+    const expiresAtISO = new Date(Date.now() + expiresInSec * 1000).toISOString();
+
+    try {
+      if (appwriteDB) {
+        await appwriteDB.createDocument(
+          APPWRITE_DB_ID,
+          APPWRITE_2FA_COLLECTION_ID,
+          ID.unique(),
+          { email, code, expiresAt: expiresAtISO }
+        );
+      } else {
+        console.warn('Appwrite não configurado. Código não armazenado.');
+      }
+    } catch (err) {
+      console.warn('Falha ao salvar código no Appwrite:', err.message);
     }
 
-    const admin = await buscarAdminPorEmail(email);
-    if (!admin) return res.status(401).json({ success: false, message: 'Admin não encontrado.' });
-
-    const ok = await bcrypt.compare(senha, admin.senha_hash);
-    if (!ok) return res.status(401).json({ success: false, message: 'Senha incorreta.' });
-
-    const code = gerarCodigo();
-    const { expiresAt } = await salvarCodigo2FA(email, code, 10);
-
-    const message = `Seu código de verificação (2FA) é: ${code}. Validade: 10 minutos.`;
-    await enviarWhatsAppZAPI(ADMIN_WHATSAPP, message);
-
-    return res.json({
+    return res.status(200).json({
       success: true,
-      message: 'Código enviado por WhatsApp.',
-      next: '/verificar-codigo',
-      email,
-      expiresAt,
+      message: 'DEV MODE: código gerado',
+      code_dev: code,
+      expiresInSec
     });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, message: 'Erro interno no login.' });
   }
+
+  res.status(501).json({ success: false, message: 'Implementação de produção pendente' });
 });
 
-// Verificar código 2FA
-app.post('/admin/verify-code', async (req, res) => {
-  try {
-    const { email, code } = req.body;
-    if (!email || !code) {
-      return res.status(400).json({ success: false, message: 'E-mail e código são obrigatórios.' });
-    }
-
-    const doc = await buscarUltimoCodigo(email);
-    if (!doc) return res.status(401).json({ success: false, message: 'Código não encontrado.' });
-
-    const agora = new Date();
-    const expira = new Date(doc.expiresAt);
-
-    if (doc.used) return res.status(401).json({ success: false, message: 'Código já utilizado.' });
-    if (agora > expira) return res.status(401).json({ success: false, message: 'Código expirado.' });
-    if (String(code).trim() !== String(doc.code).trim()) {
-      return res.status(401).json({ success: false, message: 'Código inválido.' });
-    }
-
-    await marcarCodigoComoUsado(doc.$id);
-    return res.json({ success: true, message: 'Verificação concluída. Acesso liberado.' });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, message: 'Erro interno na verificação do código.' });
+// Verificação 2FA (DEV)
+app.post('/admin/verify-2fa', (req, res) => {
+  const { email, code } = req.body || {};
+  if (typeof email !== 'string' || typeof code !== 'string') {
+    return res.status(400).json({ success: false, message: 'Parâmetros inválidos' });
   }
+
+  if (DEV_MODE === 'true') {
+    if (code === '123456') {
+      return res.json({ success: true, message: 'Código válido (DEV)' });
+    }
+    return res.status(400).json({ success: false, message: 'Código inválido (DEV)' });
+  }
+
+  res.status(501).json({ success: false, message: 'Implementação de produção pendente' });
 });
 
-// =========================
+// Start
 app.listen(PORT, () => {
-  console.log(`Backend 2FA rodando na porta ${PORT}`);
+  console.log(`Servidor ouvindo na porta ${PORT} (DEV_MODE=${process.env.DEV_MODE})`);
 });
