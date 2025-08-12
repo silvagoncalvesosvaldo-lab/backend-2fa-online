@@ -1,140 +1,189 @@
-// server.js (produção)
-try { require('dotenv').config(); } catch { /* ok no Render */ }
-
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const { Client, Databases, ID, Query } = require('node-appwrite');
 
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const DEV_MODE = process.env.DEV_MODE === 'true';
+app.use(cors({
+  origin: DEV_MODE ? '*' : (origin, cb)=> cb(null, origin),
+  credentials: true
+}));
 
-// ==== ENV ====
 const {
-  DEV_MODE,
+  PORT = 3000,
   APPWRITE_ENDPOINT,
   APPWRITE_PROJECT_ID,
   APPWRITE_API_KEY,
   APPWRITE_DB_ID,
-  APPWRITE_2FA_COLLECTION_ID,
   APPWRITE_ADMINS_COLLECTION_ID,
-  ADMIN_WHATSAPP,         // 55DDDNUMERO (sem + e sem espaços)
-  ZAPI_INSTANCE_ID,
-  ZAPI_TOKEN,
+  APPWRITE_2FA_COLLECTION_ID
 } = process.env;
 
-// ==== Appwrite ====
-let databases = null;
-if (
-  APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID && APPWRITE_API_KEY &&
-  APPWRITE_DB_ID && APPWRITE_2FA_COLLECTION_ID && APPWRITE_ADMINS_COLLECTION_ID
-) {
-  const client = new Client()
-    .setEndpoint(APPWRITE_ENDPOINT)
-    .setProject(APPWRITE_PROJECT_ID)
-    .setKey(APPWRITE_API_KEY);
-  databases = new Databases(client);
-} else {
-  console.warn('Appwrite env incompleto.');
-}
-
-// ==== helpers ====
-function randCode6() { return String(Math.floor(100000 + Math.random() * 900000)); }
-
-async function checkPassword(plain, stored) {
-  if (!stored) return false;
-  const isHash = typeof stored === 'string' && stored.startsWith('$2');
-  return isHash ? bcrypt.compare(plain, stored) : (plain === stored);
-}
-
-async function saveCode(email, code, ttlSec = 300) {
-  const expiresAt = new Date(Date.now() + ttlSec * 1000).toISOString();
+let databases;
+(function initAppwrite(){
+  const missing = [];
+  if (!APPWRITE_ENDPOINT) missing.push('APPWRITE_ENDPOINT');
+  if (!APPWRITE_PROJECT_ID) missing.push('APPWRITE_PROJECT_ID');
+  if (!APPWRITE_API_KEY) missing.push('APPWRITE_API_KEY');
+  if (!APPWRITE_DB_ID) missing.push('APPWRITE_DB_ID');
+  if (!APPWRITE_ADMINS_COLLECTION_ID) missing.push('APPWRITE_ADMINS_COLLECTION_ID');
+  if (!APPWRITE_2FA_COLLECTION_ID) missing.push('APPWRITE_2FA_COLLECTION_ID');
+  if (missing.length) {
+    console.warn('Appwrite envs missing:', missing.join(', '));
+  }
   try {
-    const old = await databases.listDocuments(
-      APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID,
-      [Query.equal('email', email)]
-    );
-    for (const d of old.documents) {
-      try { await databases.deleteDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, d.$id); } catch {}
-    }
-  } catch {}
-  return databases.createDocument(
-    APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, ID.unique(),
-    { email, code, expiresAt }
-  );
+    const client = new Client()
+      .setEndpoint(APPWRITE_ENDPOINT)
+      .setProject(APPWRITE_PROJECT_ID)
+      .setKey(APPWRITE_API_KEY);
+    databases = new Databases(client);
+    console.log('Appwrite client OK');
+  } catch (e) {
+    console.error('Failed to init Appwrite:', e);
+  }
+})();
+
+app.get('/health', (_req, res)=> {
+  res.json({ ok: true, service: 'backend-2fa-online', time: new Date().toISOString() });
+});
+
+if (DEV_MODE) {
+  app.get('/debug/env', (_req, res)=> {
+    res.json({
+      DEV_MODE,
+      APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT,
+      APPWRITE_PROJECT_ID: !!APPWRITE_PROJECT_ID,
+      APPWRITE_API_KEY: !!APPWRITE_API_KEY,
+      APPWRITE_DB_ID: !!APPWRITE_DB_ID,
+      APPWRITE_ADMINS_COLLECTION_ID: !!APPWRITE_ADMINS_COLLECTION_ID,
+      APPWRITE_2FA_COLLECTION_ID: !!APPWRITE_2FA_COLLECTION_ID
+    });
+  });
+
+  app.get('/debug/form', (_req, res)=> {
+    res.set('Content-Type', 'text/html; charset=utf-8').send(`
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Admin Test</title></head>
+<body style="font-family:sans-serif;max-width:720px;margin:40px auto;">
+  <h1>Teste de Login Admin</h1>
+  <label>Email: <input id="email" value=""></label><br><br>
+  <label>Senha: <input id="senha" type="password" value=""></label><br><br>
+  <button onclick="login()">Login /admin/login</button>
+  <pre id="loginOut"></pre>
+  <hr>
+  <h2>Verificar 2FA</h2>
+  <label>code_id: <input id="code_id" value=""></label><br><br>
+  <label>code: <input id="code" value=""></label><br><br>
+  <button onclick="verify()">Verify /admin/verify-2fa</button>
+  <pre id="verifyOut"></pre>
+<script>
+async function login(){
+  const email = document.getElementById('email').value;
+  const senha = document.getElementById('senha').value;
+  const out = document.getElementById('loginOut');
+  out.textContent = '...';
+  const r = await fetch('/admin/login', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ email, senha })
+  });
+  const j = await r.json();
+  out.textContent = JSON.stringify(j, null, 2);
+  if (j.code_id && j.code_dev) {
+    document.getElementById('code_id').value = j.code_id;
+    document.getElementById('code').value = j.code_dev;
+  }
+}
+async function verify(){
+  const code_id = document.getElementById('code_id').value;
+  const code = document.getElementById('code').value;
+  const out = document.getElementById('verifyOut');
+  out.textContent = '...';
+  const r = await fetch('/admin/verify-2fa', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ code_id, code })
+  });
+  out.textContent = JSON.stringify(await r.json(), null, 2);
+}
+</script>
+</body></html>`);
+  });
 }
 
-async function validateCode(email, code) {
-  const res = await databases.listDocuments(
-    APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID,
-    [Query.equal('email', email), Query.equal('code', code)]
-  );
-  if (!res.total) return { ok: false, reason: 'not-found' };
-  const doc = res.documents.sort((a,b)=> a.$createdAt < b.$createdAt ? 1 : -1)[0];
-  if (new Date(doc.expiresAt).getTime() < Date.now()) return { ok: false, reason: 'expired' };
-  try { await databases.deleteDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, doc.$id); } catch {}
-  return { ok: true };
+function sixDigits(){
+  return ('' + Math.floor(100000 + Math.random()*900000));
 }
 
-async function sendWhatsAppCode(phone, code) {
-  if (!ZAPI_INSTANCE_ID || !ZAPI_TOKEN) throw new Error('Z-API não configurada');
-  const url = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}/send-text`;
-  const body = { phone, message: `Código de login: ${code}` };
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`Z-API falhou (${r.status})`);
-}
-
-// ==== rotas ====
-app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
-
-// Gera e envia código (WhatsApp quando DEV_MODE=false)
-app.post('/admin/login', async (req, res) => {
+app.post('/admin/login', async (req, res)=> {
   try {
-    if (!databases) return res.status(500).json({ success:false, message:'Appwrite não configurado' });
     const { email, senha } = req.body || {};
-    if (!email || !senha) return res.status(400).json({ success:false, message:'Informe email e senha' });
+    if (!email || !senha) return res.status(400).json({ success:false, message:'Email e senha são obrigatórios' });
 
-    const admins = await databases.listDocuments(
-      APPWRITE_DB_ID, APPWRITE_ADMINS_COLLECTION_ID, [Query.equal('email', email)]
-    );
-    if (!admins.total) return res.status(401).json({ success:false, message:'Admin não encontrado' });
+    // Buscar admin por email
+    const docs = await databases.listDocuments(APPWRITE_DB_ID, APPWRITE_ADMINS_COLLECTION_ID, [
+      Query.equal('email', email)
+    ]);
+    if (!docs.total) return res.status(401).json({ success:false, message:'Admin não encontrado' });
+    const admin = docs.documents[0];
 
-    const admin = admins.documents[0];
-    const okPass = await checkPassword(senha, admin.senha);
-    if (!okPass) return res.status(401).json({ success:false, message:'Senha incorreta' });
+    const ok = admin.senha_hash && require('bcryptjs').compareSync(senha, admin.senha_hash);
+    if (!ok) return res.status(401).json({ success:false, message:'Senha incorreta' });
 
-    const dev = String(DEV_MODE).toLowerCase() === 'true';
-    const code = dev ? '123456' : randCode6();
-    await saveCode(email, code, 300);
+    // Criar código 2FA
+    const code = sixDigits();
+    const code_hash = require('bcryptjs').hashSync(code, 10);
+    const expiresAt = new Date(Date.now() + 5*60*1000).toISOString();
 
-    if (dev) {
-      return res.json({ success:true, message:'DEV MODE: código gerado', code_dev: code, expiresInSec: 300 });
-    } else {
-      if (!ADMIN_WHATSAPP) return res.status(500).json({ success:false, message:'ADMIN_WHATSAPP não configurado' });
-      await sendWhatsAppCode(ADMIN_WHATSAPP, code);
-      return res.json({ success:true, message:'Código enviado via WhatsApp' });
-    }
+    const created = await databases.createDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, ID.unique(), {
+      admin_id: admin.$id,
+      email,
+      code_hash,
+      expires_at: expiresAt,
+      used: false
+    });
+
+    const payload = {
+      success: true,
+      message: 'Login OK. Código enviado.',
+      code_id: created.$id,
+      expires_at: expiresAt
+    };
+    if (DEV_MODE) payload.code_dev = code;
+
+    return res.json(payload);
   } catch (err) {
-    console.error('login err:', err);
-    res.status(500).json({ success:false, message:'Erro ao gerar código' });
+    console.error('Login error:', err);
+    return res.status(500).json({ success:false, message:'Erro interno no login' });
   }
 });
 
-app.post('/admin/verify-2fa', async (req, res) => {
+app.post('/admin/verify-2fa', async (req, res)=> {
   try {
-    if (!databases) return res.status(500).json({ success:false, message:'Appwrite não configurado' });
-    const { email, code } = req.body || {};
-    if (!email || !code) return res.status(400).json({ success:false, message:'Informe email e code' });
-    const { ok, reason } = await validateCode(email, code);
-    if (!ok) return res.status(401).json({ success:false, message: reason==='expired'?'Código expirado':'Código inválido' });
-    return res.json({ success:true, message:'Código válido' });
+    const { code_id, code } = req.body || {};
+    if (!code_id || !code) return res.status(400).json({ success:false, message:'code_id e code são obrigatórios' });
+
+    const doc = await databases.getDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, code_id);
+    if (doc.used) return res.status(400).json({ success:false, message:'Código já usado' });
+    if (new Date(doc.expires_at).getTime() < Date.now())
+      return res.status(400).json({ success:false, message:'Código expirado' });
+
+    const ok = require('bcryptjs').compareSync(code, doc.code_hash);
+    if (!ok) return res.status(401).json({ success:false, message:'Código inválido' });
+
+    await databases.updateDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, code_id, { used: true });
+
+    // Aqui você criaria a sessão/JWT; por ora, só confirma
+    return res.json({ success:true, message:'2FA verificada' });
   } catch (err) {
-    console.error('verify err:', err);
-    res.status(500).json({ success:false, message:'Erro ao validar código' });
+    console.error('Verify error:', err);
+    return res.status(500).json({ success:false, message:'Erro interno na verificação' });
   }
 });
 
-app.listen(PORT, () => console.log(`OK na porta ${PORT}`));
+app.listen(PORT, ()=> {
+  console.log(`Server listening on :${PORT}`);
+});
