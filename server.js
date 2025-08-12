@@ -1,4 +1,6 @@
-require('dotenv').config();
+// Carrega .env localmente (não trava no Render se não existir)
+try { require('dotenv').config(); } catch (e) {}
+
 const express = require('express');
 const cors = require('cors');
 const { Client, Databases, ID } = require('node-appwrite');
@@ -19,11 +21,17 @@ const {
   APPWRITE_2FA_COLLECTION_ID
 } = process.env;
 
-// Inicialização do Appwrite
+// Inicialização do Appwrite (só se todas existirem)
 let appwriteClient = null;
 let appwriteDB = null;
 
-if (APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID && APPWRITE_API_KEY && APPWRITE_DB_ID && APPWRITE_2FA_COLLECTION_ID) {
+if (
+  APPWRITE_ENDPOINT &&
+  APPWRITE_PROJECT_ID &&
+  APPWRITE_API_KEY &&
+  APPWRITE_DB_ID &&
+  APPWRITE_2FA_COLLECTION_ID
+) {
   try {
     appwriteClient = new Client()
       .setEndpoint(APPWRITE_ENDPOINT)
@@ -36,7 +44,7 @@ if (APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID && APPWRITE_API_KEY && APPWRITE_DB_
     console.warn('Falha ao inicializar Appwrite:', err.message);
   }
 } else {
-  console.warn('Variáveis de ambiente do Appwrite incompletas. Appwrite não será inicializado.');
+  console.warn('Env do Appwrite incompletas. Appwrite não será inicializado.');
 }
 
 // Rota de saúde
@@ -48,7 +56,7 @@ app.get('/health', (req, res) => {
 app.get('/debug/env', (req, res) => {
   if (DEV_MODE !== 'true') return res.status(404).end();
 
-  const maskValue = (val) => {
+  const mask = (val) => {
     if (!val) return null;
     if (val.length <= 3) return '***';
     return '***' + val.slice(-3);
@@ -56,11 +64,11 @@ app.get('/debug/env', (req, res) => {
 
   res.json({
     DEV_MODE,
-    APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT,
-    APPWRITE_PROJECT_ID: maskValue(APPWRITE_PROJECT_ID),
-    APPWRITE_API_KEY: maskValue(APPWRITE_API_KEY),
-    APPWRITE_DB_ID: maskValue(APPWRITE_DB_ID),
-    APPWRITE_2FA_COLLECTION_ID: maskValue(APPWRITE_2FA_COLLECTION_ID)
+    APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT, // true/false
+    APPWRITE_PROJECT_ID: mask(APPWRITE_PROJECT_ID),
+    APPWRITE_API_KEY: mask(APPWRITE_API_KEY),
+    APPWRITE_DB_ID: mask(APPWRITE_DB_ID),
+    APPWRITE_2FA_COLLECTION_ID: mask(APPWRITE_2FA_COLLECTION_ID)
   });
 });
 
