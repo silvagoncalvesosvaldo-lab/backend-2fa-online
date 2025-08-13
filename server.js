@@ -1,169 +1,217 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const bcrypt = require('bcryptjs');
-const { Client, Databases, ID, Query } = require('node-appwrite');
+// server.js — Backend 2FA Admin (Appwrite + Express)
+// Tipo de módulo: ESM (package.json tem "type": "module")
+
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import bcrypt from 'bcryptjs';
+import { Client, Databases, Query, ID } from 'node-appwrite';
+
+dotenv.config();
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
-const DEV_MODE = process.env.DEV_MODE === 'true';
-app.use(cors({ origin: '*', credentials: true }));
-
 const {
+  DEV_MODE = 'true',
   PORT = 3000,
+
+  // Appwrite
   APPWRITE_ENDPOINT,
   APPWRITE_PROJECT_ID,
   APPWRITE_API_KEY,
   APPWRITE_DB_ID,
-  APPWRITE_ADMINS_COLLECTION_ID,
-  APPWRITE_2FA_COLLECTION_ID
+  APPWRITE_ADMINS_COLLECTION_ID,      // collection de admins
+  APPWRITE_2FA_COLLECTION_ID,         // collection admin_2fa_codes
 } = process.env;
 
-let databases;
-(function initAppwrite(){
-  try {
-    const client = new Client()
-      .setEndpoint(APPWRITE_ENDPOINT)
-      .setProject(APPWRITE_PROJECT_ID)
-      .setKey(APPWRITE_API_KEY);
-    databases = new Databases(client);
-    console.log('Appwrite client OK');
-  } catch (e) {
-    console.error('Failed to init Appwrite:', e);
-  }
-})();
+// ---------- Appwrite ----------
+let db = null;
+try {
+  const client = new Client()
+    .setEndpoint(APPWRITE_ENDPOINT)
+    .setProject(APPWRITE_PROJECT_ID)
+    .setKey(APPWRITE_API_KEY);
 
-app.get('/health', (_req, res)=> {
-  res.json({ ok: true, service: 'backend-2fa-online', time: new Date().toISOString() });
+  db = new Databases(client);
+  console.log('[Appwrite] Client inicializado.');
+} catch (err) {
+  console.error('[Appwrite] Falha ao inicializar:', err?.message || err);
+}
+
+// ---------- Utils ----------
+const isDev = String(DEV_MODE).toLowerCase() === 'true';
+
+function generateCodeSix() {
+  // 6 dígitos, preservando zeros à esquerda
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// ---------- Health & Debug ----------
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
 });
 
-if (DEV_MODE) {
-  app.get('/debug/env', (_req, res)=> {
-    res.json({
-      DEV_MODE,
-      APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT,
-      APPWRITE_PROJECT_ID: !!APPWRITE_PROJECT_ID,
-      APPWRITE_API_KEY: !!APPWRITE_API_KEY,
-      APPWRITE_DB_ID: !!APPWRITE_DB_ID,
-      APPWRITE_ADMINS_COLLECTION_ID: !!APPWRITE_ADMINS_COLLECTION_ID,
-      APPWRITE_2FA_COLLECTION_ID: !!APPWRITE_2FA_COLLECTION_ID
-    });
+app.get('/debug/env', (_req, res) => {
+  res.json({
+    DEV_MODE: isDev,
+    APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT,
+    APPWRITE_PROJECT_ID: !!APPWRITE_PROJECT_ID,
+    APPWRITE_API_KEY: !!APPWRITE_API_KEY,
+    APPWRITE_DB_ID: !!APPWRITE_DB_ID,
+    APPWRITE_ADMINS_COLLECTION_ID: !!APPWRITE_ADMINS_COLLECTION_ID,
+    APPWRITE_2FA_COLLECTION_ID: !!APPWRITE_2FA_COLLECTION_ID,
   });
+});
 
-  app.get('/debug/form', (_req, res)=> {
-    res.set('Content-Type', 'text/html; charset=utf-8').send(`
-<!doctype html><html><head><meta charset="utf-8"><title>Admin Test</title></head>
-<body style="font-family:sans-serif;max-width:720px;margin:40px auto;">
-<h1>Teste de Login Admin</h1>
-<label>Email: <input id="email" value=""></label><br><br>
-<label>Senha: <input id="senha" type="password" value=""></label><br><br>
-<button onclick="login()">Login /admin/login</button>
-<pre id="loginOut"></pre>
-<hr>
-<h2>Verificar 2FA</h2>
-<label>code_id: <input id="code_id" value=""></label><br><br>
-<label>code: <input id="code" value=""></label><br><br>
-<button onclick="verify()">Verify /admin/verify-2fa</button>
-<pre id="verifyOut"></pre>
-<script>
-async function login(){
-  const email = document.getElementById('email').value.trim();
-  const senha = document.getElementById('senha').value;
-  const out = document.getElementById('loginOut');
-  out.textContent = '...';
-  const r = await fetch('/admin/login', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ email, senha })
-  });
-  const j = await r.json();
-  out.textContent = JSON.stringify(j, null, 2);
-  if (j.code_id && j.code_dev) {
-    document.getElementById('code_id').value = j.code_id;
-    document.getElementById('code').value = j.code_dev;
-  }
-}
-async function verify(){
-  const code_id = document.getElementById('code_id').value.trim();
-  const code = document.getElementById('code').value.trim();
-  const out = document.getElementById('verifyOut');
-  out.textContent = '...';
-  const r = await fetch('/admin/verify-2fa', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ code_id, code })
-  });
-  out.textContent = JSON.stringify(await r.json(), null, 2);
-}
-</script>
-</body></html>`);
-  });
-}
+// Form simples para testar no navegador
+app.get('/debug/form', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`
+    <h2>Login Admin (DEBUG)</h2>
+    <form method="POST" action="/admin/login">
+      <input name="email" placeholder="email" />
+      <input name="senha" placeholder="senha" type="password" />
+      <button>Login</button>
+    </form>
+    <hr/>
+    <h2>Verificar 2FA (DEBUG)</h2>
+    <form method="POST" action="/admin/verify-2fa">
+      <input name="email" placeholder="email" />
+      <input name="code" placeholder="código 6 dígitos" />
+      <button>Verificar</button>
+    </form>
+    <script>
+      // envia como JSON
+      for (const f of document.querySelectorAll('form')) {
+        f.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const body = Object.fromEntries(new FormData(f).entries());
+          const r = await fetch(f.action, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+          const j = await r.json();
+          alert(JSON.stringify(j, null, 2));
+        });
+      }
+    </script>
+  `);
+});
 
-function sixDigits(){ return String(Math.floor(100000 + Math.random()*900000)); }
+// ---------- Rotas principais ----------
 
-app.post('/admin/login', async (req, res)=> {
+// POST /admin/login
+// 1) Busca admin por email
+// 2) Confere senha (bcrypt com campo senha_hash no Appwrite)
+// 3) Gera código 2FA, salva em admin_2fa_codes com "code" e "code_hash"
+// 4) Se DEV_MODE=true, retorna code_dev para facilitar teste
+app.post('/admin/login', async (req, res) => {
   try {
     const { email, senha } = req.body || {};
-    if (!email || !senha) return res.status(400).json({ success:false, message:'Email e senha são obrigatórios' });
+    if (!email || !senha) {
+      return res.status(400).json({ success: false, message: 'Informe email e senha.' });
+    }
+    if (!db) throw new Error('Appwrite DB não inicializado');
 
-    const docs = await databases.listDocuments(APPWRITE_DB_ID, APPWRITE_ADMINS_COLLECTION_ID, [
-      Query.equal('email', email)
+    // Buscar admin
+    const admins = await db.listDocuments(APPWRITE_DB_ID, APPWRITE_ADMINS_COLLECTION_ID, [
+      Query.equal('email', email),
+      Query.limit(1)
     ]);
-    if (!docs.total) return res.status(401).json({ success:false, message:'Admin não encontrado' });
-    const admin = docs.documents[0];
+    if (!admins.total) {
+      return res.status(401).json({ success: false, message: 'Admin não encontrado' });
+    }
+    const admin = admins.documents[0];
 
-    const ok = admin.senha_hash && bcrypt.compareSync(senha, admin.senha_hash);
-    if (!ok) return res.status(401).json({ success:false, message:'Senha incorreta' });
+    // Conferir senha
+    if (!admin.senha_hash) {
+      return res.status(500).json({ success: false, message: 'Admin sem senha_hash configurada' });
+    }
+    const ok = await bcrypt.compare(senha, admin.senha_hash);
+    if (!ok) {
+      return res.status(401).json({ success: false, message: 'Senha incorreta' });
+    }
 
-    const code = sixDigits();
-    const code_hash = bcrypt.hashSync(code, 10);
-    const expiresAt = new Date(Date.now() + 5*60*1000).toISOString();
+    // Gerar e salvar o 2FA
+    const code = generateCodeSix();
+    const code_hash = await bcrypt.hash(code, 10);
 
-    // 🔴 Ajuste: incluir também o campo "code" porque a collection exige esse atributo
-    const created = await databases.createDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, ID.unique(), {
-      admin_id: admin.$id,
-      email,
-      code,        // <— campo exigido pela collection
-      code_hash,
-      expires_at: expiresAt,
-      used: false
-    });
-
+    // ⚠️ IMPORTANTE: salvar "code" E "code_hash"
     const payload = {
-      success: true,
-      message: 'Login OK. Código enviado.',
-      code_id: created.$id,
-      expires_at: expiresAt
+      admin_id: admin.$id,
+      email: admin.email,
+      code,           // campo exigido pela collection (para DEV; em prod pode-se remover/criptografar)
+      code_hash,      // verificação segura
+      created_at: new Date().toISOString(),
+      used: false,
     };
-    if (DEV_MODE) payload.code_dev = code;
 
-    return res.json(payload);
+    const created = await db.createDocument(
+      APPWRITE_DB_ID,
+      APPWRITE_2FA_COLLECTION_ID,
+      ID.unique(),
+      payload
+    );
+
+    // Em DEV, retornamos o código para facilitar teste
+    const response = { success: true, message: 'Código 2FA gerado e enviado.' };
+    if (String(process.env.DEV_MODE).toLowerCase() === 'true') response.code_dev = code;
+
+    res.json(response);
   } catch (err) {
-    console.error('Login error:', err);
-    return res.status(500).json({ success:false, message:'Erro interno no login' });
+    console.error('Erro /admin/login', err);
+    res.status(500).json({ success: false, message: 'Erro interno no login' });
   }
 });
 
-app.post('/admin/verify-2fa', async (req, res)=> {
+// POST /admin/verify-2fa
+// Confere último código do admin e marca como usado
+app.post('/admin/verify-2fa', async (req, res) => {
   try {
-    const { code_id, code } = req.body || {};
-    if (!code_id || !code) return res.status(400).json({ success:false, message:'code_id e code são obrigatórios' });
+    const { email, code } = req.body || {};
+    if (!email || !code) {
+      return res.status(400).json({ success: false, message: 'Informe email e código.' });
+    }
+    if (!db) throw new Error('Appwrite DB não inicializado');
 
-    const doc = await databases.getDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, code_id);
-    if (doc.used) return res.status(400).json({ success:false, message:'Código já usado' });
-    if (new Date(doc.expires_at).getTime() < Date.now())
-      return res.status(400).json({ success:false, message:'Código expirado' });
+    // Buscar admin
+    const admins = await db.listDocuments(APPWRITE_DB_ID, APPWRITE_ADMINS_COLLECTION_ID, [
+      Query.equal('email', email),
+      Query.limit(1)
+    ]);
+    if (!admins.total) {
+      return res.status(401).json({ success: false, message: 'Admin não encontrado' });
+    }
+    const admin = admins.documents[0];
 
-    const ok = bcrypt.compareSync(code, doc.code_hash);
-    if (!ok) return res.status(401).json({ success:false, message:'Código inválido' });
+    // Buscar códigos desse admin (pega o mais recente não usado)
+    const codes = await db.listDocuments(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, [
+      Query.equal('admin_id', admin.$id),
+      Query.equal('used', false),
+      Query.orderDesc('$createdAt'),
+      Query.limit(1),
+    ]);
+    if (!codes.total) {
+      return res.status(400).json({ success: false, message: 'Nenhum código ativo encontrado' });
+    }
+    const entry = codes.documents[0];
 
-    await databases.updateDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, code_id, { used: true });
+    // Verificar bcrypt
+    const ok = await bcrypt.compare(code, entry.code_hash);
+    if (!ok) {
+      return res.status(401).json({ success: false, message: 'Código inválido' });
+    }
 
-    return res.json({ success:true, message:'2FA verificada' });
+    // Marcar como usado
+    await db.updateDocument(APPWRITE_DB_ID, APPWRITE_2FA_COLLECTION_ID, entry.$id, { used: true });
+
+    res.json({ success: true, message: '2FA verificado com sucesso' });
   } catch (err) {
-    console.error('Verify error:', err);
-    return res.status(500).json({ success:false, message:'Erro interno na verificação' });
+    console.error('Erro /admin/verify-2fa', err);
+    res.status(500).json({ success: false, message: 'Erro interno na verificação' });
   }
 });
 
-app.listen(PORT, ()=> console.log(`Server listening on :${PORT}`));
+// ---------- Start ----------
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`Servidor rodando na porta ${process.env.PORT || 3000}`);
+});
